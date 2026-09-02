@@ -36,6 +36,14 @@ public static class Program
         Recreate,
     }
 
+    private enum InteractiveMode
+    {
+        // Default: skip install/output dir questions, ask only modules and asset types
+        SelectModules,
+        // Ask all questions: install dir, output dir, modules, asset types
+        AskAll,
+    }
+
     private static readonly (string Label, AssetKindFlags Flag)[] AssetTypeOptions =
     [
         ("Textures - DDS (.dds)", AssetKindFlags.Dds),
@@ -72,6 +80,7 @@ public static class Program
             string? bundleFilter = options.BundleFilter;
             var fileMode = options.FileMode;
             var fileModeExplicitlySet = options.FileModeExplicitlySet;
+            var interactiveMode = options.InteractiveMode;
 
             var settings = UserSettings.Load();
             TextureConverter.SetFfmpegTimeoutSeconds(settings.GetTextureFfmpegTimeoutSeconds());
@@ -85,7 +94,17 @@ public static class Program
             var maxParallelConversions = options.MaxParallelConversions ?? settings.GetMaxParallelConversions();
             var verbose = options.Verbose;
 
-            bool interactive = installDir == null;
+            // Paths from CLI are always used directly (non-interactive mode).
+            // If paths are not from CLI:
+            //   - In AskAll mode, always prompt for them
+            //   - In SelectModules mode (default), use saved paths if available; only prompt if missing
+            bool pathsFromCli = installDir != null && outputDir != null;
+            bool needsPathPrompts = !pathsFromCli &&
+                (interactiveMode == InteractiveMode.AskAll ||
+                 settings.InstallDir == null || settings.OutputDir == null);
+            // We're in "pure CLI mode" (no user interaction) only if paths are all from CLI
+            bool pureCLIMode = pathsFromCli;
+            bool interactive = !pureCLIMode;
 
             if (installDir == null)
             {
@@ -93,9 +112,17 @@ public static class Program
                 if (savedInstallDir != null && !File.Exists(Path.Combine(savedInstallDir, "DistantWorlds2.exe")))
                     savedInstallDir = null; // no longer a valid DW2 install, don't offer to reuse it
 
-                installDir = ConfirmOrPickFolder(savedInstallDir,
-                    "Use your previously selected Distant Worlds 2 install folder?",
-                    "Select your Distant Worlds 2 install folder (contains DistantWorlds2.exe)");
+                if (needsPathPrompts)
+                {
+                    installDir = ConfirmOrPickFolder(savedInstallDir,
+                        "Use your previously selected Distant Worlds 2 install folder?",
+                        "Select your Distant Worlds 2 install folder (contains DistantWorlds2.exe)");
+                }
+                else
+                {
+                    // No prompts needed, use saved install dir
+                    installDir = savedInstallDir;
+                }
             }
             if (installDir == null)
             {
@@ -110,9 +137,17 @@ public static class Program
 
             if (outputDir == null)
             {
-                outputDir = ConfirmOrPickFolder(settings.OutputDir,
-                    "Use your previously selected output folder?",
-                    "Select where extracted assets should be saved");
+                if (needsPathPrompts)
+                {
+                    outputDir = ConfirmOrPickFolder(settings.OutputDir,
+                        "Use your previously selected output folder?",
+                        "Select where extracted assets should be saved");
+                }
+                else
+                {
+                    // No prompts needed, use saved output dir
+                    outputDir = settings.OutputDir;
+                }
             }
             if (outputDir == null)
             {
@@ -248,9 +283,6 @@ public static class Program
                     : AssetTypeOptions.Where(o => assetTypes.HasFlag(o.Flag)).Select(o => o.Flag.ToString()).ToList();
             }
 
-            if (assetTypes.HasFlag(AssetKindFlags.Fbx))
-                assetTypes |= AssetKindFlags.Png;
-
             if (interactive)
             {
                 settings.InstallDir = installDir;
@@ -299,6 +331,7 @@ public static class Program
         public bool Verbose { get; init; }
         public FileHandlingMode FileMode { get; init; } = FileHandlingMode.Unspecified;
         public bool FileModeExplicitlySet { get; init; }
+        public InteractiveMode InteractiveMode { get; init; } = InteractiveMode.SelectModules;
     }
 
     private static CommandLineOptions ParseArgs(string[] args)
@@ -309,10 +342,32 @@ public static class Program
         var verbose = false;
         var fileMode = FileHandlingMode.Unspecified;
         var fileModeExplicitlySet = false;
+        var interactiveMode = InteractiveMode.SelectModules;
 
         for (var i = 0; i < args.Length; i++)
         {
             var arg = args[i];
+
+            if (arg is "-h" or "-?" or "-help" or "--help")
+            {
+                PrintHelp();
+                Environment.Exit(0);
+            }
+
+            if (arg is "-reset")
+            {
+                // Reset removes the settings file and uses AskAll mode
+                UserSettings.Reset();
+                interactiveMode = InteractiveMode.AskAll;
+                continue;
+            }
+
+            if (arg is "-ask")
+            {
+                interactiveMode = InteractiveMode.AskAll;
+                continue;
+            }
+
             if (arg is "-j" or "--jobs" or "--max-parallelism" or "--max-parallel-bundles")
             {
                 if (i + 1 >= args.Length || !int.TryParse(args[++i], out var parsed) || parsed <= 0)
@@ -372,7 +427,37 @@ public static class Program
             Verbose = verbose,
             FileMode = fileMode,
             FileModeExplicitlySet = fileModeExplicitlySet,
+            InteractiveMode = interactiveMode,
         };
+    }
+
+    private static void PrintHelp()
+    {
+        RunLogger.Info("Distant Worlds 2 Asset Extractor");
+        RunLogger.Info(string.Empty);
+        RunLogger.Info("Usage: dw2extract.exe [options]");
+        RunLogger.Info(string.Empty);
+        RunLogger.Info("Options:");
+        RunLogger.Info("  [<installDir> <outputDir> [bundleNameFilter]]");
+        RunLogger.Info("                           Specify paths and optional bundle filter directly (non-interactive).");
+        RunLogger.Info(string.Empty);
+        RunLogger.Info("  -ask                    Ask all interactive questions (install dir, output dir, modules, asset types).");
+        RunLogger.Info("  -reset                  Clear saved settings and ask all questions.");
+        RunLogger.Info(string.Empty);
+        RunLogger.Info("  -overwrite              Overwrite existing files during extraction.");
+        RunLogger.Info("  -skip-existing          Skip files that already exist (default with saved dirs).");
+        RunLogger.Info("  -recreate               Delete output folder contents before extraction.");
+        RunLogger.Info(string.Empty);
+        RunLogger.Info("  -j <count>              Max parallel bundle extractions (default: auto-detected).");
+        RunLogger.Info("  --max-parallel-conversions <count>");
+        RunLogger.Info("                          Max parallel texture/sound/mesh conversions (default: processor count).");
+        RunLogger.Info(string.Empty);
+        RunLogger.Info("  -v, --verbose           Verbose logging output.");
+        RunLogger.Info("  -h, -?, -help, --help   Show this help message.");
+        RunLogger.Info(string.Empty);
+        RunLogger.Info("Defaults:");
+        RunLogger.Info("  When run without paths, uses saved install/output directories if available.");
+        RunLogger.Info("  This skips the path selection prompts and goes straight to module/asset selection.");
     }
 
     private static string ResolveLogPath()
@@ -521,18 +606,6 @@ public static class Program
                 var isChecked = lastSelected == null || lastSelected.Contains(flag.ToString(), StringComparer.OrdinalIgnoreCase);
                 listBox.Items.Add(label, isChecked);
             }
-
-            // FBX export needs PNG textures to link materials to (see MeshExporter) — nudge the user
-            // toward that up front rather than silently overriding their choice after the fact. This is
-            // a one-way convenience, not a hard lock: PNG can still be unchecked afterward, but Main()
-            // forces it back on before extraction if FBX ends up selected regardless.
-            var fbxIndex = Array.FindIndex(AssetTypeOptions, o => o.Flag == AssetKindFlags.Fbx);
-            var pngIndex = Array.FindIndex(AssetTypeOptions, o => o.Flag == AssetKindFlags.Png);
-            listBox.ItemCheck += (_, e) =>
-            {
-                if (e.Index == fbxIndex && e.NewValue == CheckState.Checked)
-                    listBox.SetItemChecked(pngIndex, true);
-            };
 
             var selectAllButton = new Button { Text = "All", Left = 10, Top = 212, Width = 90, Height = 36 };
             selectAllButton.Click += (_, _) =>
@@ -821,7 +894,12 @@ public static class Program
                 {
                     var wantDds = assetTypes.HasFlag(AssetKindFlags.Dds);
                     var wantPng = assetTypes.HasFlag(AssetKindFlags.Png);
-                    if (!wantDds && !wantPng)
+                    // If FBX extraction is enabled, we need PNG files for material linking, even if PNG
+                    // isn't globally selected for viewing. Only create PNGs for FBX-referenced textures
+                    // (the MeshExporter will look for them), not all textures.
+                    var fbxEnabled = assetTypes.HasFlag(AssetKindFlags.Fbx);
+
+                    if (!wantDds && !wantPng && !fbxEnabled)
                         return;
 
                     var ddsPath = destBase + ".dds";
@@ -831,11 +909,12 @@ public static class Program
                     {
                         var ddsExists = File.Exists(ddsPath);
                         var ddsNeeded = wantDds && !ddsExists;
-                        var pngNeeded = wantPng && !File.Exists(pngPath);
+                        // PNG is needed if: user wants it, OR FBX is enabled AND PNG doesn't exist yet
+                        var pngNeeded = (wantPng || fbxEnabled) && !File.Exists(pngPath);
 
                         if (!ddsNeeded && !pngNeeded)
                         {
-                            // Everything we actually want is already there.
+                            // Everything we need is already there.
                             stats.Skipped++;
                             if (wantDds) stats.SkippedFiles++;
                             if (wantPng) stats.SkippedFiles++;
@@ -844,12 +923,11 @@ public static class Program
 
                         if (!ddsNeeded && pngNeeded && ddsExists)
                         {
-                            // The DDS is already on disk (this bundle's own file, or left over from an
-                            // earlier run that only asked for DDS) and the PNG is the only thing missing —
+                            // The DDS is already on disk and the PNG is the only thing missing —
                             // convert straight from it instead of re-extracting and re-decoding the raw
                             // bundle asset just to regenerate a DDS we already have.
                             pendingConversions.Add(conversionPool.Schedule(() =>
-                                Task.FromResult(ConvertExistingDdsToPng(ddsPath, pngPath, wantDds, url, startedAt))));
+                                Task.FromResult(ConvertExistingDdsToPng(ddsPath, pngPath, wantDds, wantPng, fbxEnabled, url, startedAt))));
                             return;
                         }
                     }
@@ -859,7 +937,7 @@ public static class Program
                         throw new IOException("extract failed");
 
                     pendingConversions.Add(conversionPool.Schedule(() =>
-                        Task.FromResult(ConvertTexture(rawPath, ddsPath, pngPath, wantDds, wantPng, bundleName, url, startedAt))));
+                        Task.FromResult(ConvertTexture(rawPath, ddsPath, pngPath, wantDds, wantPng, fbxEnabled, bundleName, url, startedAt))));
                     return;
                 }
 
@@ -944,16 +1022,26 @@ public static class Program
     }
 
     // The DDS is already on disk (skip-existing shortcut) — only the PNG needs to be produced.
-    private static Stats ConvertExistingDdsToPng(string ddsPath, string pngPath, bool wantDds, string url, long startedAt)
+    private static Stats ConvertExistingDdsToPng(string ddsPath, string pngPath, bool wantDds, bool wantPng, bool fbxEnabled, string url, long startedAt)
     {
         var stats = new Stats();
         try
         {
-            TextureConverter.DdsToPng(ddsPath, pngPath);
-            stats.Textures++;
-            stats.PngFiles++;
-            if (wantDds)
+            // Create PNG if user wants it OR if FBX is enabled (needs PNG for materials)
+            if (wantPng || fbxEnabled)
+            {
+                TextureConverter.DdsToPng(ddsPath, pngPath);
+                stats.Textures++;
+                stats.PngFiles++;
+                if (wantDds)
+                    stats.SkippedFiles++;  // DDS already existed, wasn't recreated
+            }
+            else if (wantDds)
+            {
+                // Only DDS is wanted, it already exists, PNG is not wanted and FBX is not enabled — this is a complete skip
+                stats.Skipped++;
                 stats.SkippedFiles++;
+            }
             stats.TextureMilliseconds += Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
         }
         catch (Exception ex)
@@ -965,7 +1053,7 @@ public static class Program
         return stats;
     }
 
-    private static Stats ConvertTexture(string rawPath, string ddsPath, string pngPath, bool wantDds, bool wantPng, string bundleName, string url, long startedAt)
+    private static Stats ConvertTexture(string rawPath, string ddsPath, string pngPath, bool wantDds, bool wantPng, bool fbxEnabled, string bundleName, string url, long startedAt)
     {
         var stats = new Stats();
         try
@@ -975,7 +1063,8 @@ public static class Program
             File.Delete(ddsPath + ".refs");
 
             var pngOk = false;
-            if (wantPng)
+            // Create PNG if user wants it OR if FBX is enabled (needs PNG for materials)
+            if (wantPng || fbxEnabled)
             {
                 try
                 {

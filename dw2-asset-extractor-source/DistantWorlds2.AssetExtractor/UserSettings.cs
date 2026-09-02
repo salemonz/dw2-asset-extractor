@@ -138,4 +138,17 @@ internal sealed class UserSettings
             // Non-fatal — worst case the user gets asked to browse again next run.
         }
     }
+
+    public static void Reset()
+    {
+        try
+        {
+            if (File.Exists(SettingsPath))
+                File.Delete(SettingsPath);
+        }
+        catch
+        {
+            // Non-fatal — if deletion fails, Load() will just return fresh settings anyway.
+        }
+    }
 }
