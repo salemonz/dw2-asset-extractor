@@ -35,3 +35,9 @@
 - now has conversion level parallelism for radically improved performance
 - added recreate mode that first cleans the target folder than regenerates the requested files
 - fixed ffmpeg color handling for stride bundles
+
+## cli-help-and-types
+
+- Added `-types <list>` to pick asset types from the command line (`dds`, `png`, `textures`, `wav`/`sounds`, `fbx`/`meshes`, `misc`, `all`), e.g. `-types textures` for DDS + PNG only. Also skips the asset-type checklist in interactive mode
+- Unknown options and wrong argument counts now print the error and usage line and exit with code 2, instead of being taken as paths
+- `--help` (also `-h`, `-?`, `/?`, `-help`) is checked before any other argument, returns normally so the log is flushed, and documents `-types` and when a file mode is required

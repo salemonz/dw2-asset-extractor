@@ -74,7 +74,24 @@ public static class Program
             RunLogger.Info("meshes -> .fbx, everything else copied as-is (shader source, data files, ...).");
             RunLogger.Info(string.Empty);
 
-            var options = ParseArgs(args);
+            CommandLineOptions options;
+            try
+            {
+                options = ParseArgs(args);
+            }
+            catch (ArgumentException ex)
+            {
+                RunLogger.Error(ex.Message);
+                RunLogger.Error(UsageLine);
+                RunLogger.Error("Run dw2extract.exe --help for details.");
+                return 2;
+            }
+            if (options.ShowHelp)
+            {
+                PrintHelp();
+                return 0;
+            }
+
             string? installDir = options.InstallDir;
             string? outputDir = options.OutputDir;
             string? bundleFilter = options.BundleFilter;
@@ -265,7 +282,11 @@ public static class Program
             }
 
             AssetKindFlags assetTypes;
-            if (!interactive)
+            if (options.AssetTypes is { } cliAssetTypes)
+            {
+                assetTypes = cliAssetTypes;
+            }
+            else if (!interactive)
             {
                 assetTypes = AssetKindFlags.All;
             }
@@ -332,6 +353,40 @@ public static class Program
         public FileHandlingMode FileMode { get; init; } = FileHandlingMode.Unspecified;
         public bool FileModeExplicitlySet { get; init; }
         public InteractiveMode InteractiveMode { get; init; } = InteractiveMode.SelectModules;
+        // null = not given: All in CLI mode, the asset-type checklist in interactive mode.
+        public AssetKindFlags? AssetTypes { get; init; }
+        public bool ShowHelp { get; init; }
+    }
+
+    private const string UsageLine = "Usage: dw2extract.exe [<installDir> <outputDir> [bundleNameFilter]] [-types <list>] [-overwrite | -skip-existing | -recreate] [-j <count>] [--max-parallel-conversions <count>] [-v]";
+
+    // Names accepted by -types. "textures" is DDS + PNG with no meshes, so no FBX-driven PNGs either.
+    private static readonly (string Name, AssetKindFlags Flags)[] AssetTypeNames =
+    [
+        ("dds", AssetKindFlags.Dds),
+        ("png", AssetKindFlags.Png),
+        ("textures", AssetKindFlags.Dds | AssetKindFlags.Png),
+        ("wav", AssetKindFlags.Wav),
+        ("sounds", AssetKindFlags.Wav),
+        ("fbx", AssetKindFlags.Fbx),
+        ("meshes", AssetKindFlags.Fbx),
+        ("misc", AssetKindFlags.Misc),
+        ("all", AssetKindFlags.All),
+    ];
+
+    private static AssetKindFlags ParseAssetTypes(string arg, string value)
+    {
+        var flags = AssetKindFlags.None;
+        foreach (var part in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var match = AssetTypeNames.FirstOrDefault(t => string.Equals(t.Name, part, StringComparison.OrdinalIgnoreCase));
+            if (match.Name == null)
+                throw new ArgumentException($"{arg}: unknown asset type '{part}'. Use a comma-separated list of: {string.Join(", ", AssetTypeNames.Select(t => t.Name))}.");
+            flags |= match.Flags;
+        }
+        if (flags == AssetKindFlags.None)
+            throw new ArgumentException($"{arg} requires at least one asset type.");
+        return flags;
     }
 
     private static CommandLineOptions ParseArgs(string[] args)
@@ -343,15 +398,23 @@ public static class Program
         var fileMode = FileHandlingMode.Unspecified;
         var fileModeExplicitlySet = false;
         var interactiveMode = InteractiveMode.SelectModules;
+        AssetKindFlags? assetTypes = null;
+
+        // Help wins over everything else on the line, before any argument can fail to parse or a reset can
+        // delete the settings file.
+        if (args.Any(a => a is "-h" or "-?" or "/?" or "-help" or "--help"))
+            return new CommandLineOptions { ShowHelp = true };
 
         for (var i = 0; i < args.Length; i++)
         {
             var arg = args[i];
 
-            if (arg is "-h" or "-?" or "-help" or "--help")
+            if (arg is "-types" or "--types")
             {
-                PrintHelp();
-                Environment.Exit(0);
+                if (i + 1 >= args.Length)
+                    throw new ArgumentException($"{arg} requires a comma-separated list of asset types.");
+                assetTypes = ParseAssetTypes(arg, args[++i]);
+                continue;
             }
 
             if (arg is "-reset")
@@ -411,11 +474,16 @@ public static class Program
                 continue;
             }
 
+            // A mistyped option must not become a positional path (or, with no other args, fall through to
+            // the interactive checklists).
+            if (arg.StartsWith('-'))
+                throw new ArgumentException($"Unknown option '{arg}'.");
+
             positional.Add(arg);
         }
 
         if (positional.Count != 0 && positional.Count != 2 && positional.Count != 3)
-            throw new ArgumentException("Usage: dw2extract.exe [<installDir> <outputDir> [bundleNameFilter]] [-overwrite | -skip-existing | -recreate] [-j <count>] [--max-parallel-conversions <count>] [-v]");
+            throw new ArgumentException($"Expected 0, 2 or 3 positional arguments, got {positional.Count}.");
 
         return new CommandLineOptions
         {
@@ -428,24 +496,31 @@ public static class Program
             FileMode = fileMode,
             FileModeExplicitlySet = fileModeExplicitlySet,
             InteractiveMode = interactiveMode,
+            AssetTypes = assetTypes,
         };
     }
 
     private static void PrintHelp()
     {
-        RunLogger.Info("Distant Worlds 2 Asset Extractor");
-        RunLogger.Info(string.Empty);
-        RunLogger.Info("Usage: dw2extract.exe [options]");
+        RunLogger.Info(UsageLine);
         RunLogger.Info(string.Empty);
         RunLogger.Info("Options:");
         RunLogger.Info("  [<installDir> <outputDir> [bundleNameFilter]]");
-        RunLogger.Info("                           Specify paths and optional bundle filter directly (non-interactive).");
+        RunLogger.Info("                          Specify paths and optional bundle filter directly (non-interactive).");
+        RunLogger.Info("                          The filter selects every bundle whose name contains it.");
+        RunLogger.Info(string.Empty);
+        RunLogger.Info("  -types <list>           Asset types to extract, comma-separated (default: all; skips the checklist):");
+        RunLogger.Info("                          dds, png, textures (= dds,png), wav/sounds, fbx/meshes, misc, all.");
+        RunLogger.Info("                          fbx also writes the PNGs its materials link to.");
+        RunLogger.Info("                          Example: -types textures");
         RunLogger.Info(string.Empty);
         RunLogger.Info("  -ask                    Ask all interactive questions (install dir, output dir, modules, asset types).");
         RunLogger.Info("  -reset                  Clear saved settings and ask all questions.");
         RunLogger.Info(string.Empty);
         RunLogger.Info("  -overwrite              Overwrite existing files during extraction.");
-        RunLogger.Info("  -skip-existing          Skip files that already exist (default with saved dirs).");
+        RunLogger.Info("  -skip-existing          Skip files that already exist.");
+        RunLogger.Info("                          Without one of these three, a non-empty output folder is asked about");
+        RunLogger.Info("                          interactively, or is an error in non-interactive mode.");
         RunLogger.Info("  -recreate               Delete output folder contents before extraction.");
         RunLogger.Info(string.Empty);
         RunLogger.Info("  -j <count>              Max parallel bundle extractions (default: auto-detected).");
