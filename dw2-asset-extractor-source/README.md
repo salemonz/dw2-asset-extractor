@@ -125,6 +125,10 @@ to skip the dialogs (and both checklists — this form extracts every bundle and
 every asset type): `dw2extract.exe "C:\...\Distant Worlds 2" "D:\output"`. A
 third argument limits the run to bundles whose name contains it
 (case-insensitive), e.g. `dw2extract.exe "C:\...\Distant Worlds 2" "D:\output" Human`.
+`-types <list>` limits the asset types (comma-separated: `dds`, `png`,
+`textures` for both, `wav`, `fbx`, `misc`), e.g. `... Human -types textures`
+for textures only. If the output folder isn't empty, also pass `-overwrite`,
+`-skip-existing` or `-recreate`. Run `dw2extract.exe --help` for every option.
 
 Heads up: a full-catalog extraction (all bundles, all asset types selected)
 pulls around 30-40 GB from the game's bundles, and full conversion (especially
